@@ -19,8 +19,8 @@ import (
 	"image"
 	"compress/gzip"
 	"bytes"
-	// "github.com/rakyll/statik/fs"
-	  // _ "./statik" 
+	StatikVFS "github.com/rakyll/statik/fs"
+	  _ "./statik" 
 
 
 	// "github.com/vincentLiuxiang/lu"
@@ -38,6 +38,9 @@ var (
     corsAllowOrigin      = "*"   
     corsAllowCredentials = "true"    
 ) 
+var FSRHThumbs fasthttp.RequestHandler
+var FSRHDownld fasthttp.RequestHandler
+var statikFS http.FileSystem
 
 // `{"name":"document.txt", "isDir":false,"age":38, "inFolder":0}`, nil)
 
@@ -67,7 +70,6 @@ func appInit(){
 	fmt.Println(BaseDirFiles);
 	ThumbDir = "./Thumbs/";
 	RandomizeFileNames = true;
-
 }
 func dbInit(){
 	StorageDatabase, _ = buntdb.Open("data.db")
@@ -415,13 +417,46 @@ func FolderCreationHandler(ctx *fasthttp.RequestCtx){
 }
 
 func FrontHandler(ctx *fasthttp.RequestCtx) {
-	ctx.SetContentType("text/html")
-	ctx.SetStatusCode(fasthttp.StatusOK)
+	fileName := ctx.UserValue("fileID")
+	fmt.Println(fileName)
+	extension := fileName.(string)
+	extension = extension[strings.LastIndex(extension, ".")+1:len(extension)]
+	fmt.Println(extension)
+	file, err:= statikFS.Open("/"+fileName.(string));
+	var headers map[string]string
+	headers = make(map[string]string)
+	headers["html"] = "text/html"
+	headers["js"] = "application/javscript"
+	headers["css"] = "text/css"
+	if (err != nil){
+		fmt.Println(err);
+		return;
+	}else{
+		f, err:= file.Stat()
+		if (err!=nil){
+			fmt.Println(err)
+			return;
+		}else{
+			sz:=f.Size()
+			var d []byte;
+			d = make([]byte,sz);
+			_, err:= file.Read(d)
+			if err != nil {
+				fmt.Println(err);
+			}else{
+				ctx.SetContentType(headers[extension])
+				ctx.SetStatusCode(fasthttp.StatusOK)
+				ctx.SetBody(d)
+			}
+		}
+	}
+	_=file
+
 
 	// then write the first part of body
-	fmt.Fprintf(ctx, `
-			<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,shrink-to-fit=no"><meta name="theme-color" content="#000000"><link rel="manifest" href="/manifest.json"><link rel="shortcut icon" href="/favicon.ico"><title>DataBall App</title></head><body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div><script type="text/javascript" src="/static/app.js"></script></body></html>
-	`)
+	// fmt.Fprintf(ctx, `
+	// 		<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,shrink-to-fit=no"><meta name="theme-color" content="#000000"><link rel="manifest" href="/manifest.json"><link rel="shortcut icon" href="/favicon.ico"><title>DataBall App</title></head><body><noscript>You need to enable JavaScript to run this app.</noscript><div id="root"></div><script type="text/javascript" src="/static/app.js"></script></body></html>
+	// `)
 
 	// then set more headers
 	// ctx.Response.Header.Set("Foo-Bar", "baz")
@@ -476,7 +511,7 @@ func AfterHandler(ctx *fasthttp.RequestCtx) {
 		</form>
 
 	`)
-	}
+}
 
 
 func EndpointOutFilter(ctx *fasthttp.RequestCtx){
@@ -492,6 +527,38 @@ func AppConfigData(ctx *fasthttp.RequestCtx){
 	EndpointOutFilter(ctx)
 }
 
+func PerformAuthorization(ctx *fasthttp.RequestCtx) bool {
+	// return false;
+	return true;
+} 
+
+func SecureEndpoint(h fasthttp.RequestHandler) fasthttp.RequestHandler {
+	return fasthttp.RequestHandler(func(ctx *fasthttp.RequestCtx) {
+		// Get the Basic Authentication credentials
+		isVerified := PerformAuthorization(ctx)
+
+		if isVerified {
+			// Delegate request to the given handle
+			h(ctx)
+			return
+		}
+		// Request Basic Authentication otherwise
+		ctx.Error(fasthttp.StatusMessage(fasthttp.StatusUnauthorized), fasthttp.StatusUnauthorized)
+		ctx.Response.Header.Set("WWW-Authenticate", "Basic realm=Restricted")
+	})
+}
+
+
+func ThumbAssetServer(ctx *fasthttp.RequestCtx) {
+	// fasthttp.ServeFileUncompressed(ctx);
+	FSRHThumbs(ctx)
+}
+
+func DownldServer(ctx *fasthttp.RequestCtx){
+	FSRHDownld(ctx)
+}
+
+
 func main(){
 
 	appInit();
@@ -499,26 +566,49 @@ func main(){
 
 	router := fasthttprouter.New()
 
+
 	router.GET("/static/app.js", (AppFrontendJS))
 	router.OPTIONS("/" + APIBase + "/config", (EndpointOutFilter))
-	router.GET("/" + APIBase + "/config", (AppConfigData))
-	router.GET("/" + APIBase + "/folders/:folderID", (FolderContentHandler))
+	router.GET("/" + APIBase + "/config", SecureEndpoint(AppConfigData))
+	// router.GET("/" + APIBase + "/config", SecurityCheck, (AppConfigData))
+	router.GET("/" + APIBase + "/folders/:folderID", SecureEndpoint(FolderContentHandler))
 	router.OPTIONS("/" + APIBase + "/folder/create", EndpointOutFilter)
-	router.POST("/" + APIBase + "/folder/create", FolderCreationHandler)
-	router.GET("/" + APIBase + "/assets/:fileID", AssetContentHandler)
-	router.DELETE("/" + APIBase + "/assets/:fileID", AssetDeleteHandler)
+	router.POST("/" + APIBase + "/folder/create", SecureEndpoint(FolderCreationHandler))
+	router.GET("/" + APIBase + "/assets/:fileID", SecureEndpoint(AssetContentHandler))
+	router.DELETE("/" + APIBase + "/assets/:fileID", SecureEndpoint(AssetDeleteHandler))
 	router.OPTIONS("/" + APIBase + "/assets/:fileID", EndpointOutFilter)
-	router.POST("/" + APIBase + "/asset/create", FileCreationHandler)
-	router.GET("/front", FrontHandler)
-	router.ServeFiles("/" + APIBase + "/Thumbs/*filepath", ThumbDir)
-	router.ServeFiles("/" + APIBase + "/Downloads/*filepath", BaseDirFiles)
+	router.POST("/" + APIBase + "/asset/create", SecureEndpoint(FileCreationHandler))
+	router.GET("/front/:fileID", FrontHandler)
+	/**
+	* Static File server
+	*/
+	staticFileBasePath:= "/" + APIBase + "/Thumbs/"
+	staticFileDownPath:= "/" + APIBase + "/Downloads/"
+	fsthumbs := &fasthttp.FS{
+		Root:               ThumbDir,
+		IndexNames:         []string{"index.html"},
+		GenerateIndexPages: false,
+		Compress:           false,
+	}
+	fsthumbs.PathRewrite = fasthttp.NewPathPrefixStripper(len(staticFileBasePath)-1)
+	fsdownld := &fasthttp.FS{
+		Root:               BaseDirFiles,
+		IndexNames:         []string{"index.html"},
+		GenerateIndexPages: false,
+		Compress:           true,
+	}
+	fsdownld.PathRewrite = fasthttp.NewPathPrefixStripper(len(staticFileDownPath)-1)
+	FSRHThumbs = fsthumbs.NewRequestHandler()
+	FSRHDownld = fsdownld.NewRequestHandler()
+	router.GET(staticFileBasePath + "*filepath", (ThumbAssetServer) )
+	router.GET(staticFileDownPath + "*filepath", (DownldServer))
 	fmt.Println("Starting server");
 	h := &fasthttp.Server{
 		Handler: router.Handler,
 		MaxRequestBodySize: 2 * 1024 * 1024 * 1024,
 	}
 	// go func(){
-	// 	statikFS, err := fs.New()
+		statikFS, _ = StatikVFS.New()
 	// 	if err != nil {
 	// 		fmt.Println(err)
 	// 		return;
@@ -528,7 +618,5 @@ func main(){
 	// }()
 
 	h.ListenAndServe(":8080")
-
-
 
 }
