@@ -21,8 +21,8 @@ import (
 	"bytes"
 	StatikVFS "github.com/rakyll/statik/fs"
 	  _ "./statik" 
-
-
+	prestoapp "./local_vendor/prestoapp"
+	prestoweb "./local_vendor/prestoweb"
 	// "github.com/vincentLiuxiang/lu"
 )
 
@@ -558,8 +558,34 @@ func DownldServer(ctx *fasthttp.RequestCtx){
 	FSRHDownld(ctx)
 }
 
+func JWTTokenCreationHandler(ctx *fasthttp.RequestCtx){
+	username:=ctx.FormValue("username")
+	password:=ctx.FormValue("password")
+
+	token, err := prestoweb.GenerateToken(string(username), string(password) )
+	// token, err:= prestoweb.GenerateToken(username.(string), password.(string))
+	if (err!= nil){
+		ctx.SetStatusCode(fasthttp.StatusForbidden)
+		/**
+		* @TODO return error
+		*/
+		return;
+	}
+	EndpointOutFilter(ctx)
+	ctx.SetBody([]byte(token))
+}
+
+func JWTTokenVerify(ctx *fasthttp.RequestCtx){
+	auth := ctx.Request.Header.Peek("Authorization")
+	if auth == nil {
+		return
+	}
+	fmt.Println( auth)
+}
+
 
 func main(){
+	prestoapp.Presto();
 
 	appInit();
 	dbInit();
@@ -570,8 +596,13 @@ func main(){
 	router.GET("/static/app.js", (AppFrontendJS))
 	router.OPTIONS("/" + APIBase + "/config", (EndpointOutFilter))
 	router.GET("/" + APIBase + "/config", SecureEndpoint(AppConfigData))
+	router.OPTIONS("/" + APIBase + "/web/token", EndpointOutFilter)
+	router.POST("/" + APIBase + "/web/token", (JWTTokenCreationHandler))
+	router.OPTIONS("/" + APIBase + "/web/token/verify", EndpointOutFilter)
+	router.POST("/" + APIBase + "/web/token/verify", (JWTTokenVerify))
 	// router.GET("/" + APIBase + "/config", SecurityCheck, (AppConfigData))
 	router.GET("/" + APIBase + "/folders/:folderID", SecureEndpoint(FolderContentHandler))
+	router.OPTIONS("/" + APIBase + "/folders/:folderID", SecureEndpoint(EndpointOutFilter))
 	router.OPTIONS("/" + APIBase + "/folder/create", EndpointOutFilter)
 	router.POST("/" + APIBase + "/folder/create", SecureEndpoint(FolderCreationHandler))
 	router.GET("/" + APIBase + "/assets/:fileID", SecureEndpoint(AssetContentHandler))
