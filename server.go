@@ -527,24 +527,26 @@ func AppConfigData(ctx *fasthttp.RequestCtx){
 	EndpointOutFilter(ctx)
 }
 
-func PerformAuthorization(ctx *fasthttp.RequestCtx) bool {
-	// return false;
-	return true;
-} 
+
 
 func SecureEndpoint(h fasthttp.RequestHandler) fasthttp.RequestHandler {
 	return fasthttp.RequestHandler(func(ctx *fasthttp.RequestCtx) {
 		// Get the Basic Authentication credentials
-		isVerified := PerformAuthorization(ctx)
+		isVerified, data := PerformAuthorization(ctx)
 
 		if isVerified {
 			// Delegate request to the given handle
 			h(ctx)
 			return
 		}
+		_=data
+		EndpointOutFilter(ctx)
+		ctx.SetContentType("application/javascript")
+		ctx.SetStatusCode(fasthttp.StatusOK)
+		ctx.SetBody(data)
 		// Request Basic Authentication otherwise
-		ctx.Error(fasthttp.StatusMessage(fasthttp.StatusUnauthorized), fasthttp.StatusUnauthorized)
-		ctx.Response.Header.Set("WWW-Authenticate", "Basic realm=Restricted")
+		// ctx.Error(fasthttp.StatusMessage(fasthttp.StatusUnauthorized), fasthttp.StatusUnauthorized)
+		// ctx.Response.Header.Set("WWW-Authenticate", "Basic realm=Restricted")
 	})
 }
 
@@ -562,25 +564,50 @@ func JWTTokenCreationHandler(ctx *fasthttp.RequestCtx){
 	username:=ctx.FormValue("username")
 	password:=ctx.FormValue("password")
 
-	token, err := prestoweb.GenerateToken(string(username), string(password) )
+	token, _ := prestoweb.GenerateToken(string(username), string(password) )
 	// token, err:= prestoweb.GenerateToken(username.(string), password.(string))
-	if (err!= nil){
-		ctx.SetStatusCode(fasthttp.StatusForbidden)
-		/**
-		* @TODO return error
-		*/
-		return;
-	}
+	// if (err!= nil){
+	// 	ctx.SetStatusCode(fasthttp.StatusForbidden)
+	// 	/**
+	// 	* @TODO return error
+	// 	*/
+	// 	return;
+	// }
 	EndpointOutFilter(ctx)
 	ctx.SetBody([]byte(token))
 }
-
+func PerformAuthorization(ctx *fasthttp.RequestCtx) (bool, []byte) {
+	auth := ctx.Request.Header.Peek("Authorization")
+	resp := prestoweb.ServerResponseTokenValidity{Valid:false, Error:""}
+	if auth == nil || string(auth) == "" {
+		resp.Error = "Authorization Token Not Found"
+		resp.ErrorCode = prestoapp.ErrorAuthCodeNotFound;
+		respJson, _ :=json.Marshal((resp))
+		return false, respJson
+	}
+	isValid, err :=prestoweb.ValidateToken(string(auth))
+	
+	if err != nil {
+		resp.Error = string(err.Error())
+	}
+	resp.Valid = isValid;
+	respJson, _ :=json.Marshal((resp))
+	return isValid, respJson
+} 
 func JWTTokenVerify(ctx *fasthttp.RequestCtx){
 	auth := ctx.Request.Header.Peek("Authorization")
-	if auth == nil {
+	if auth == nil || string(auth) == "" {
 		return
 	}
-	fmt.Println( auth)
+	isValid, err :=prestoweb.ValidateToken(string(auth))
+	resp := prestoweb.ServerResponseTokenValidity{Valid:isValid, Error:""}
+	if err != nil {
+		resp.Error = string(err.Error())
+	}
+	respJson, _ :=json.Marshal((resp))
+	EndpointOutFilter(ctx)
+	ctx.SetBody(respJson)
+	// fmt.Println( string(auth) )
 }
 
 
@@ -599,7 +626,7 @@ func main(){
 	router.OPTIONS("/" + APIBase + "/web/token", EndpointOutFilter)
 	router.POST("/" + APIBase + "/web/token", (JWTTokenCreationHandler))
 	router.OPTIONS("/" + APIBase + "/web/token/verify", EndpointOutFilter)
-	router.POST("/" + APIBase + "/web/token/verify", (JWTTokenVerify))
+	router.GET("/" + APIBase + "/web/token/verify", (JWTTokenVerify))
 	// router.GET("/" + APIBase + "/config", SecurityCheck, (AppConfigData))
 	router.GET("/" + APIBase + "/folders/:folderID", SecureEndpoint(FolderContentHandler))
 	router.OPTIONS("/" + APIBase + "/folders/:folderID", SecureEndpoint(EndpointOutFilter))
@@ -608,6 +635,7 @@ func main(){
 	router.GET("/" + APIBase + "/assets/:fileID", SecureEndpoint(AssetContentHandler))
 	router.DELETE("/" + APIBase + "/assets/:fileID", SecureEndpoint(AssetDeleteHandler))
 	router.OPTIONS("/" + APIBase + "/assets/:fileID", EndpointOutFilter)
+	router.OPTIONS("/" + APIBase + "/asset/create", (EndpointOutFilter))
 	router.POST("/" + APIBase + "/asset/create", SecureEndpoint(FileCreationHandler))
 	router.GET("/front/:fileID", FrontHandler)
 	/**
