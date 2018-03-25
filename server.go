@@ -18,7 +18,10 @@ import (
 	"github.com/disintegration/imaging"
 	"image"
 	"compress/gzip"
+	"crypto/sha256"
+	"encoding/hex"
 	"bytes"
+	"errors"
 	StatikVFS "github.com/rakyll/statik/fs"
 	  _ "./statik" 
 	prestoapp "./local_vendor/prestoapp"
@@ -55,6 +58,7 @@ type Asset struct {
     // AbsPath  string `json:"abspath"`
     T string `json:t`
     Thumbnail string `json:thumbnail`
+    Hash string `json:hash`
 }
 
 func appInit(){
@@ -145,21 +149,27 @@ func FolderContentHandler(ctx *fasthttp.RequestCtx) {
 	EndpointOutFilter(ctx);
 }
 
+
+
+
+
 func AssetContentHandler(ctx *fasthttp.RequestCtx) {
 	s := ctx.UserValue("fileID");
 	StorageDatabase.View(func(tx *buntdb.Tx) error {
-
 		out, err:=tx.Get(s.(string));
-
-		if (err==nil){
-
-			fmt.Fprintf(ctx,"%s", out)
-			
+		var asset Asset;
+		json.Unmarshal([]byte(out), &asset)
+		if (asset.InFolder == -1){
+			fmt.Fprintf(ctx,"{\"Error\":\"%s\", \"ErrorCode\":\"2\"}", `DNE`)
 		}else{
-			out = (string(err.Error()));
-			fmt.Fprintf(ctx,"{\"Error\":\"%s\"}", out)
+			if (err==nil){
+				fmt.Fprintf(ctx,"%s", out)
+			}else{
+				out = (string(err.Error()));
+				fmt.Fprintf(ctx,"{\"Error\":\"%s\"}", out)
+			}
 		}
-		return nil
+		return nil	
 	})
 }
 /**
@@ -190,27 +200,99 @@ func RandomNameGenerator(n int) string {
     return string(b)
 }
 
+func GetFileHash(filePath string) (result string, err error) {
+    file, err := os.Open(filePath)
+    if err != nil {
+        return
+    }
+    defer file.Close()
+
+    hash := sha256.New()
+    _, err = io.Copy(hash, file)
+    if err != nil {
+        return
+    }
+
+    result = hex.EncodeToString(hash.Sum(nil))
+    return
+}
+
+
+func AssetUpdateHandler(ctx *fasthttp.RequestCtx) {
+	s := ctx.UserValue("fileID");
+	ss := s.(string)
+	_, err := ctx.FormFile("file")
+	hasFile := true;
+	if err != nil {
+		// fmt.Fprintf(ctx,string(err.Error()), "")
+		hasFile = false;
+		return;
+	}
+
+	fmt.Println("Received Request for updating fileID = " + ss)
+
+	StorageDatabase.View(func(tx *buntdb.Tx) error {
+		out, err:=tx.Get(s.(string));
+		if (err==nil){
+			// fmt.Fprintf(ctx,"%s", out)
+			var r Asset
+			err:=json.Unmarshal([]byte(out), &r)
+			if err != nil{
+				fmt.Fprintf(ctx,"{\"Error\":\"%s\"}", "Unable to obtain that asset.")
+			}else{
+				
+				if (hasFile){
+					fmt.Println("Request has file");
+					/**
+					* 1-Find and delete previous file
+					* 2-Create New File
+					*
+					*/
+
+					sd, err:=DeleteAssetByID(ss)
+					fmt.Println("Deletion result = " + string(sd))
+					CreateAssetEntry(ctx, ss)
+					_=err;
+				}
+			}
+		}else{
+			out = (string(err.Error()));
+			fmt.Fprintf(ctx,"{\"Error\":\"%s\"}", out)
+		}
+		return nil
+	})
+	EndpointOutFilter(ctx)
+}
+
+
 func FileCreationHandler(ctx *fasthttp.RequestCtx) {
+	_, err := ctx.FormFile("file")
+
+	if err != nil {
+		fmt.Fprintf(ctx,string(err.Error()), "")
+		return;
+	}
+	
+	
+	CreateAssetEntry(ctx, "")
+	EndpointOutFilter(ctx);
+}
+
+func UploadFileFromContext(ctx *fasthttp.RequestCtx)(name, newName, extension, hash, thumbPath, supported string){
 	file, err := ctx.FormFile("file")
 
 	if err != nil {
 		fmt.Fprintf(ctx,string(err.Error()), "")
 		return;
 	}
-
-	parent := ctx.FormValue("parent")
-	parentString := "0"
-	if (string(parent) != ""){
-		parentString = string(parent)
-	}
-	var filename = file.Filename;
-	var extension = filepath.Ext(filename)
+	filename:= file.Filename;
+	extension = filepath.Ext(filename)
 	if (extension == ""){
 		extension = ".dat";
 	}
-	var name = filename[0:len(filename)-len(extension)]
+	name = filename[0:len(filename)-len(extension)]
 	var absPath = ""
-	var newName = file.Filename;
+	newName = file.Filename;
 	fmt.Println("Handling upload of file = " + newName);
 	fmt.Println("File extension = " + extension);
 	if (RandomizeFileNames){
@@ -219,10 +301,6 @@ func FileCreationHandler(ctx *fasthttp.RequestCtx) {
 	}else{
 		absPath =  BaseDirFiles  + name + extension;
 	}
-	// dir, err := filepath.Abs(filepath.Dir(os.Args[0]))
- //    if err != nil {
- //        fmt.Println(err)
- //    }
 	err = fasthttp.SaveMultipartFile(file, absPath)
 	if (err!=nil){
 		fmt.Println(err);
@@ -231,7 +309,11 @@ func FileCreationHandler(ctx *fasthttp.RequestCtx) {
 	contentType := http.DetectContentType(fileContents)
 	// fmt.Println("Content type = " + contentType);
 	isSupported, _ := InArray(contentType,SupportedImages)
-	var thumbPath = ""
+	supported = "yes"
+	if !isSupported {
+		supported = "no"
+	}
+	thumbPath = ""
 	if (isSupported){
 		imagefile, _ := os.Open(absPath)
     	defer imagefile.Close()
@@ -241,13 +323,27 @@ func FileCreationHandler(ctx *fasthttp.RequestCtx) {
 		imaging.Save(dstImage128, thumbPath)
 		// fmt.Println("Is supported Image type");
 	}
+	fmt.Println("File = " + absPath)
+	hash,_=GetFileHash(absPath)
+	return
+}
+
+func CreateAssetEntry(ctx *fasthttp.RequestCtx, oldId string ){
+	parent := ctx.FormValue("parent")
+	parentString := "0"
+	if (string(parent) != ""){
+		parentString = string(parent)
+	}
+
+	name, newName, extension, hash, thumbPath, supported := UploadFileFromContext(ctx)
+	fmt.Println("Creating asset entry for = " + name)
 	StorageDatabase.Update(func(tx *buntdb.Tx) error {
 		total, err:= tx.Len()
 		if (err==nil){
 			totalString := strconv.Itoa(total+1)
 			fmt.Println("Creating record "+ totalString);
 			var additional = ""
-			if isSupported {
+			if supported == "yes" {
 				additional = `,"thumbnail": "`+thumbPath[1:len(thumbPath)]+`"`
 			}
 			ts := strconv.FormatInt((time.Now().Unix()),10)
@@ -256,12 +352,16 @@ func FileCreationHandler(ctx *fasthttp.RequestCtx) {
 			if (extension != ""){
 				fextension = extension[1:len(extension)]
 			}
-			tx.Set(totalString, `{"name":"`+name+`","tname":"`+newName+extension+`","extension":"`+fextension+`","isDir":false,"inFolder":`+parentString+`,"ts":`+ts+``+additional+`}`, nil)
+			recordData :=  `{"name":"`+name+`","tname":"`+newName+extension+`","extension":"`+fextension+`","isDir":false,"inFolder":`+parentString+`,"ts":`+ts+``+additional+`, "hash":"`+hash+`"}`
+			fmt.Println("Record Data = " + recordData)
+			if (oldId != ""){
+				totalString = oldId;
+			}
+			tx.Set(totalString, recordData, nil)
 		}
 		fmt.Fprintf(ctx,`{"T":`+strconv.Itoa(total)+`}`)
 		return nil
 	})
-	EndpointOutFilter(ctx);
 }
 
 func RmAsset( index string ) error {
@@ -351,41 +451,57 @@ func RmDir( index string ){
 	// });
 }
 
-func AssetDeleteHandler(ctx *fasthttp.RequestCtx){
-	fileID := ctx.UserValue("fileID")
-	var ss = (fileID.(string));
-	// RmDir(fileID.(string));
+func DeleteAssetByID(fileID string )([]byte, error){
 	var asset Asset;
 	// done := make(chan bool)
+	var outererr error;
 	StorageDatabase.View(func(tx *buntdb.Tx) error {
-		fmt.Println("Getting Asset from the database");
-		
-		str, err := tx.Get(ss)
-		
+		fmt.Println("Getting Asset from the database For deletion");
+		str, err := tx.Get(fileID)
 		err = json.Unmarshal([]byte(str), &asset)
+		// fmt.Println(err)
+		// fmt.Println(asset)
 		if (err!=nil){
 			msg := `{"Error":"Unable to open asset."}`
-			fmt.Fprintf(ctx,msg)
-			fmt.Println(msg)
+			outererr = errors.New(msg)
+			// return nil ;
+			// fmt.Fprintf(ctx,msg)
+			// fmt.Println(msg)
 		}else{
 			
 		}
-		// done <- true
 		return nil;
 	})
+	if (outererr != nil ){
+		fmt.Println(outererr)
+		return nil, outererr
+	}
 	// _ = <-done
 	if (asset.IsDir){
-		RmDir(ss)
-		fmt.Fprintf(ctx,`{"Msg":"Directory removed."}`)
+		fmt.Println("[Deleter] Asset is directory")
+		RmDir(fileID)
+		// fmt.Fprintf(ctx,)
+		return []byte(`{"Msg":"Directory removed."}`),nil
 	}else{
-		err := RmAsset(ss);
+		fmt.Println("[Deleter] Asset is file")
+		err := RmAsset(fileID);
 		if (err!=nil){
 			fmt.Println(err);
 			//@TODO Return error 500
 		}else{
-			fmt.Fprintf(ctx,`{"Msg":"File removed."}`)
+			return []byte(`{"Msg":"File removed."}`),nil
+			
 		}
 	}
+	return nil,nil;
+}
+
+func AssetDeleteHandler(ctx *fasthttp.RequestCtx){
+	fileID := ctx.UserValue("fileID")
+	var ss = (fileID.(string));
+	// RmDir(fileID.(string));
+	resp,_:=DeleteAssetByID(ss)
+	fmt.Fprintf(ctx,string(resp))
 	EndpointOutFilter(ctx);
 }
 
@@ -563,22 +679,24 @@ func DownldServer(ctx *fasthttp.RequestCtx){
 func JWTTokenCreationHandler(ctx *fasthttp.RequestCtx){
 	username:=ctx.FormValue("username")
 	password:=ctx.FormValue("password")
-
-	token, _ := prestoweb.GenerateToken(string(username), string(password) )
-	// token, err:= prestoweb.GenerateToken(username.(string), password.(string))
-	// if (err!= nil){
-	// 	ctx.SetStatusCode(fasthttp.StatusForbidden)
-	// 	/**
-	// 	* @TODO return error
-	// 	*/
-	// 	return;
-	// }
+	token, _ := prestoweb.GenerateToken(string(username), string(password), false )
 	EndpointOutFilter(ctx)
 	ctx.SetBody([]byte(token))
 }
+
+func JWTTokenCreationHandlerApp(ctx *fasthttp.RequestCtx){
+	username:=ctx.FormValue("username")
+	password:=ctx.FormValue("password")
+	fmt.Println("Received request for APP token from " + string(username))
+	token, _ := prestoweb.GenerateToken(string(username), string(password), true )
+	EndpointOutFilter(ctx)
+	ctx.SetBody([]byte(token))
+}
+
+
 func PerformAuthorization(ctx *fasthttp.RequestCtx) (bool, []byte) {
 	auth := ctx.Request.Header.Peek("Authorization")
-	resp := prestoweb.ServerResponseTokenValidity{Valid:false, Error:""}
+	resp := prestoweb.ServerResponseTokenValidity{Valid:false, Error:"", ErrorCode:1}
 	if auth == nil || string(auth) == "" {
 		resp.Error = "Authorization Token Not Found"
 		resp.ErrorCode = prestoapp.ErrorAuthCodeNotFound;
@@ -618,8 +736,14 @@ func main(){
 	dbInit();
 
 	router := fasthttprouter.New()
-
-
+	/**
+	* App API Endpoints
+	*
+	*/
+	router.POST("/" + APIBase + "/app/token", (JWTTokenCreationHandlerApp))
+	/**
+	* Common API Endpoints
+	*/
 	router.GET("/static/app.js", (AppFrontendJS))
 	router.OPTIONS("/" + APIBase + "/config", (EndpointOutFilter))
 	router.GET("/" + APIBase + "/config", SecureEndpoint(AppConfigData))
@@ -633,6 +757,7 @@ func main(){
 	router.OPTIONS("/" + APIBase + "/folder/create", EndpointOutFilter)
 	router.POST("/" + APIBase + "/folder/create", SecureEndpoint(FolderCreationHandler))
 	router.GET("/" + APIBase + "/assets/:fileID", SecureEndpoint(AssetContentHandler))
+	router.POST("/" + APIBase + "/assets/:fileID", SecureEndpoint(AssetUpdateHandler))
 	router.DELETE("/" + APIBase + "/assets/:fileID", SecureEndpoint(AssetDeleteHandler))
 	router.OPTIONS("/" + APIBase + "/assets/:fileID", EndpointOutFilter)
 	router.OPTIONS("/" + APIBase + "/asset/create", (EndpointOutFilter))
@@ -677,5 +802,4 @@ func main(){
 	// }()
 
 	h.ListenAndServe(":8080")
-
 }
