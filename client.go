@@ -238,6 +238,8 @@ func performFileUpload(endpoint string, path string, parent string )int64{
 		resp.Body.Close()
 		var r ServerResponse
 	    json.Unmarshal(body.Bytes(), &r)
+	    remoteId := strconv.FormatInt(r.T, 10)
+	    log.Println("Upload result for " + path + " |-> id = " + remoteId)
 	    return r.T;
 	}
 	return 0;
@@ -253,14 +255,36 @@ func RemoteCreateAsset(name string, path string, parent string ) int64 {
 	return -1;
 }
 
-func RemoteUpdateAsset(id string, name string, path string ) int64 {
+func RemoteUpdateAsset(id string, asset Asset, path string ) int64 {
+	name:=asset.Name;
 	log.Println("Updating asset = " + name)
-
 	upload:=AssetPreUploadCheck(name, path)
 	if (upload){
 		log.Println("Uploading : "+name)
-		return performFileUpload("/assets/"+id, path, "")
-		// return 0;
+		// performRemoteAssetDelete()
+		out:=PerformRequestJSONResp("GET", "/assets/"+id,nil)
+		// fmt.Println(string(out))
+		var r ServerResponseAsset
+		json.Unmarshal(out, &r)
+		remotename := r.Name + "." + r.Extension;
+		if (remotename  == name && asset.IsDir == r.IsDir){
+			/**
+			* Asset is the same on local and remote
+			* now we can delete the remote copy and update it
+			* 
+			*/
+			log.Println("Asset is SAME on local and remote. Local Name = " + asset.Name + " Remote Name = " + remotename );
+			return 1;
+		}else{
+			/**
+			* Asset is not the same
+			*/
+			log.Println("Asset is not the same. Local Name = " + asset.Name + " Remote Name = " + remotename );
+			return 0;
+		}
+		// fmt.Println(string(out));
+		// return performFileUpload("/assets/"+id, path, "")
+		return 0;
 	}
 	return -1;
 }
@@ -581,7 +605,18 @@ func UploadFromDbFile( ){
 						/**
 						* This does not currently work
 						*/
-						RemoteUpdateAsset(xxs, asset.Name, key)
+						fmt.Println("File = " + asset.Name + " exists on the remote");
+						/**
+						* Let's see if the entry here is the same on the remote.
+						*/
+						id:=RemoteUpdateAsset(xxs, asset, key)
+						if (id == 0){
+							asset.RemoteID = id
+							assetArray = append(assetArray, asset)
+						}else{
+
+						}
+						_=id;
 					}
 				}
 			}
@@ -598,8 +633,8 @@ func UploadFromDbFile( ){
 			if err != nil {
 				log.Fatalf(string(err.Error()) );
 			}else{
-				fmt.Println("Asset = " + asset.Name)
-				fmt.Println(asset.RemoteID);
+				log.Println("Asset = " + asset.Name)
+				log.Println(asset.RemoteID);
 				tx.Set(asset.FilePath,string(b),nil);
 			}			
 		}
@@ -613,6 +648,7 @@ func PushUpstream(){
     UploadFromDbFile()
     ClientStorageDatabase.Shrink()
 }
+
 func GetFileHash(filePath string) (result string, err error) {
     file, err := os.Open(filePath)
     if err != nil {
@@ -849,11 +885,16 @@ func main(){
     	fmt.Println("Pushing Upstream");
     	initApp()
     	PushUpstream();
+    	PushUpstream();
     }else{
     	fmt.Println("Pulling Downstream");
     	PullDownStream();
     }
 
+
     // PullDownStream();
+
+    
+
 
 }
