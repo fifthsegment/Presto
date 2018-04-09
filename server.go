@@ -339,8 +339,9 @@ func CreateAssetEntry(ctx *fasthttp.RequestCtx, oldId string ){
 	fmt.Println("Creating asset entry for = " + name)
 	StorageDatabase.Update(func(tx *buntdb.Tx) error {
 		total, err:= tx.Len()
+		totalString := strconv.Itoa(total+1)
 		if (err==nil){
-			totalString := strconv.Itoa(total+1)
+			
 			fmt.Println("Creating record "+ totalString);
 			var additional = ""
 			if supported == "yes" {
@@ -359,7 +360,7 @@ func CreateAssetEntry(ctx *fasthttp.RequestCtx, oldId string ){
 			}
 			tx.Set(totalString, recordData, nil)
 		}
-		fmt.Fprintf(ctx,`{"T":`+strconv.Itoa(total)+`}`)
+		fmt.Fprintf(ctx,`{"T":`+totalString+`}`)
 		return nil
 	})
 }
@@ -802,4 +803,5 @@ func main(){
 	// }()
 
 	h.ListenAndServe(":8080")
+
 }
